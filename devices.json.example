@@ -5,21 +5,25 @@
     "enabled": true,
     "activeDays": "1,2,3,4,5",
     "activeHours": "8-20",
+    "activeWindows": [
+      { "start": "2026-11-16 21:52", "end": "2026-11-17 23:59" },
+      { "start": "2026-12-10 05:30", "end": "2026-12-18 18:40" }
+    ],
     "timezone": "Europe/Berlin",
     "minDelaySeconds": 5,
     "maxDelaySeconds": 20,
-    "cooldownSeconds": 60,
-    "activeWindows": [
-      { "start": "2026-11-16 18:52", "end": "2026-11-17 10:05" },
-      { "start": "2026-12-10 16:30", "end": "2026-12-18 05:45" }
-    ]
+    "cooldownSeconds": 60
   },
   {
     "name": "Apartment B",
     "id": 222222222,
     "enabled": false,
-    "activeDays": "1,2,3,4,5",
-    "activeHours": "9-18",
+    "activeDays": "",
+    "activeHours": "",
+    "activeWindows": [
+      { "start": "2026-11-16 18:52", "end": "2026-11-17 10:05" },
+      { "start": "2026-12-10 16:30", "end": "2026-12-18 05:45" }
+    ],
     "timezone": "Europe/Berlin",
     "minDelaySeconds": 3,
     "maxDelaySeconds": 8,
