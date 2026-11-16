@@ -1,6 +1,10 @@
 # Secrets — the refresh token grants full access to your Ring account
 .env
 
+# Local device config (ids + schedules) — keep devices.json.example tracked
+devices.json
+
+
 # Dependencies
 node_modules/
 

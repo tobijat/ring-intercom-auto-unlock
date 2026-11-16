@@ -17,34 +17,9 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { RingApi } from 'ring-client-api'
 
-const ENV_PATH = join(dirname(fileURLToPath(import.meta.url)), '.env')
-
-const MIN_DELAY = Number(process.env.MIN_DELAY_SECONDS ?? 5)
-const MAX_DELAY = Number(process.env.MAX_DELAY_SECONDS ?? 20)
-// window after an unlock during which new dings are ignored,
-// so the gate doesn't open again if the visitor rings twice
-const COOLDOWN = Number(process.env.COOLDOWN_SECONDS ?? 60)
-
-// auto-unlock is only active on these days/hours
-const TIMEZONE = process.env.TIMEZONE ?? 'Europe/Rome'
-// one or more hour ranges, e.g. "8-20" or "8-12,13-20" (start inclusive, end exclusive);
-// START_HOUR/END_HOUR are still honored as a fallback for older configs
-const ACTIVE_HOURS = (
-  process.env.ACTIVE_HOURS ??
-  `${process.env.START_HOUR ?? 8}-${process.env.END_HOUR ?? 20}`
-)
-  .split(',')
-  .map((range) => {
-    const [start, end] = range.split('-').map(Number)
-    return { start, end }
-  })
-// 1=Monday ... 7=Sunday
-const ACTIVE_DAYS = (process.env.ACTIVE_DAYS ?? '1,2,3,4,5').split(',').map(Number)
-
-if (ACTIVE_HOURS.some(({ start, end }) => !Number.isInteger(start) || !Number.isInteger(end) || start >= end)) {
-  console.error(`Invalid ACTIVE_HOURS: "${process.env.ACTIVE_HOURS}". Expected e.g. "8-20" or "8-12,13-20"`)
-  process.exit(1)
-}
+const APP_DIR = dirname(fileURLToPath(import.meta.url))
+const ENV_PATH = join(APP_DIR, '.env')
+const DEVICES_PATH = join(APP_DIR, 'devices.json')
 
 // info (default) | debug — debug also enables ring-client-api internal logs
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info'
@@ -53,9 +28,39 @@ const HEARTBEAT_MINUTES = Number(process.env.HEARTBEAT_MINUTES ?? 60)
 
 const WEEKDAYS = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }
 
-function isWithinSchedule(date = new Date()) {
+function parseDays(value) {
+  return String(value)
+    .split(',')
+    .map((part) => Number(part.trim()))
+}
+
+function parseHours(value) {
+  return String(value)
+    .split(',')
+    .map((range) => {
+      const [start, end] = range.trim().split('-').map(Number)
+      return { start, end }
+    })
+}
+
+function validateHours(hours, label) {
+  if (hours.some(({ start, end }) => !Number.isInteger(start) || !Number.isInteger(end) || start >= end)) {
+    console.error(`Invalid ${label}. Expected e.g. "8-20" or "8-12,13-20"`)
+    process.exit(1)
+  }
+}
+
+function formatHours(hours) {
+  return hours.map(({ start, end }) => `${start}:00-${end}:00`).join(', ')
+}
+
+function localTime(timezone, date = new Date()) {
+  return date.toLocaleString('en-GB', { timeZone: timezone })
+}
+
+function isWithinSchedule(schedule, date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: TIMEZONE,
+    timeZone: schedule.timezone,
     weekday: 'short',
     hour: 'numeric',
     hourCycle: 'h23',
@@ -63,17 +68,120 @@ function isWithinSchedule(date = new Date()) {
   const weekday = WEEKDAYS[parts.find((p) => p.type === 'weekday').value]
   const hour = Number(parts.find((p) => p.type === 'hour').value)
   return (
-    ACTIVE_DAYS.includes(weekday) &&
-    ACTIVE_HOURS.some(({ start, end }) => hour >= start && hour < end)
+    schedule.days.includes(weekday) &&
+    schedule.hours.some(({ start, end }) => hour >= start && hour < end)
   )
 }
 
-function formatHours() {
-  return ACTIVE_HOURS.map(({ start, end }) => `${start}:00-${end}:00`).join(', ')
+function requireNumber(entry, key, label) {
+  const value = Number(entry[key])
+  if (!Number.isFinite(value) || value < 0) {
+    console.error(`devices.json entry ${label}: "${key}" must be a number >= 0`)
+    process.exit(1)
+  }
+  return value
 }
 
-function localTime(date = new Date()) {
-  return date.toLocaleString('en-GB', { timeZone: TIMEZONE })
+function timingFromValues(minDelay, maxDelay, cooldown, label) {
+  if (minDelay > maxDelay) {
+    console.error(`${label}: minDelaySeconds (${minDelay}) must be <= maxDelaySeconds (${maxDelay})`)
+    process.exit(1)
+  }
+  return { minDelay, maxDelay, cooldown }
+}
+
+function scheduleFromDevice(entry) {
+  const label = entry.name ? `"${entry.name}" (id ${entry.id})` : `id ${entry.id}`
+  for (const key of ['activeDays', 'activeHours', 'timezone']) {
+    if (entry[key] == null || entry[key] === '') {
+      console.error(`devices.json entry ${label} is missing required "${key}"`)
+      process.exit(1)
+    }
+  }
+  const days = parseDays(entry.activeDays)
+  const hours = parseHours(entry.activeHours)
+  const timezone = String(entry.timezone)
+  validateHours(hours, `activeHours for ${label}`)
+  if (days.some((day) => !Number.isInteger(day) || day < 1 || day > 7)) {
+    console.error(`Invalid activeDays for ${label}: "${entry.activeDays}"`)
+    process.exit(1)
+  }
+  return { days, hours, timezone }
+}
+
+function timingFromDevice(entry) {
+  const label = entry.name ? `"${entry.name}" (id ${entry.id})` : `id ${entry.id}`
+  for (const key of ['minDelaySeconds', 'maxDelaySeconds', 'cooldownSeconds']) {
+    if (entry[key] == null || entry[key] === '') {
+      console.error(`devices.json entry ${label} is missing required "${key}"`)
+      process.exit(1)
+    }
+  }
+  return timingFromValues(
+    requireNumber(entry, 'minDelaySeconds', label),
+    requireNumber(entry, 'maxDelaySeconds', label),
+    requireNumber(entry, 'cooldownSeconds', label),
+    label,
+  )
+}
+
+async function loadDeviceConfigs() {
+  let raw
+  try {
+    raw = await readFile(DEVICES_PATH, 'utf8')
+  } catch (e) {
+    if (e.code === 'ENOENT') {
+      console.error(
+        'devices.json is required. Copy devices.json.example to devices.json and set your intercom ids.',
+      )
+      process.exit(1)
+    }
+    throw e
+  }
+
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (e) {
+    console.error(`Invalid JSON in devices.json: ${e.message}`)
+    process.exit(1)
+  }
+
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    console.error('devices.json must be a non-empty array of device objects')
+    process.exit(1)
+  }
+
+  const byId = new Map()
+  for (const entry of parsed) {
+    const id = Number(entry.id)
+    if (!Number.isInteger(id)) {
+      console.error(`Each devices.json entry needs a numeric "id" (got ${JSON.stringify(entry.id)})`)
+      process.exit(1)
+    }
+    if (byId.has(id)) {
+      console.error(`Duplicate device id in devices.json: ${id}`)
+      process.exit(1)
+    }
+    if (entry.enabled != null && typeof entry.enabled !== 'boolean') {
+      console.error(`devices.json entry id ${id}: "enabled" must be true or false`)
+      process.exit(1)
+    }
+    byId.set(id, {
+      id,
+      name: entry.name != null ? String(entry.name) : null,
+      enabled: entry.enabled !== false,
+      schedule: scheduleFromDevice(entry),
+      timing: timingFromDevice(entry),
+    })
+  }
+  return byId
+}
+
+function deviceLabel(config, intercom) {
+  if (config?.name) return `"${config.name}" (id ${config.id})`
+  if (intercom) return `"${intercom.name}" (id ${intercom.id})`
+  return `id ${config.id}`
 }
 
 const log = {
@@ -102,14 +210,14 @@ if (!process.env.RING_REFRESH_TOKEN) {
   process.exit(1)
 }
 
+const deviceConfigs = await loadDeviceConfigs()
+
 log.info('Starting auto-unlock service')
 log.info(`  node ${process.version}, log level: ${LOG_LEVEL}`)
-log.info(`  unlock delay: ${MIN_DELAY}-${MAX_DELAY}s, cooldown: ${COOLDOWN}s`)
+const enabledCount = [...deviceConfigs.values()].filter((d) => d.enabled).length
 log.info(
-  `  active window: days [${ACTIVE_DAYS.join(',')}] (1=Mon...7=Sun), ` +
-    `hours ${formatHours()} (${TIMEZONE})`,
+  `  devices.json loaded (${deviceConfigs.size} listed, ${enabledCount} enabled)`,
 )
-log.info(`  local time is ${localTime()} — window is ${isWithinSchedule() ? 'ACTIVE' : 'NOT active'}`)
 
 const ringApi = new RingApi({
   refreshToken: process.env.RING_REFRESH_TOKEN,
@@ -137,17 +245,63 @@ log.debug('Connecting to Ring locations...')
 const locations = await ringApi.getLocations()
 log.info(`Locations found: ${locations.map((l) => `"${l.name}"`).join(', ')}`)
 
-const intercoms = locations.flatMap((location) => location.intercoms)
+const allIntercoms = locations.flatMap((location) => location.intercoms)
 
-if (intercoms.length === 0) {
+if (allIntercoms.length === 0) {
   log.error('No Ring Intercom found on this account.')
   process.exit(1)
 }
 
-for (const intercom of intercoms) {
+for (const intercom of allIntercoms) {
   log.info(
     `Intercom found: "${intercom.name}" (id ${intercom.id}, type ${intercom.deviceType}, ` +
       `battery ${intercom.batteryLevel}%${intercom.isOffline ? ', OFFLINE' : ''})`,
+  )
+}
+
+const intercoms = []
+const matchedIds = new Set()
+for (const intercom of allIntercoms) {
+  const config = deviceConfigs.get(Number(intercom.id))
+  if (!config) {
+    log.info(`  -> skipping "${intercom.name}" (id ${intercom.id}): not listed in devices.json`)
+    continue
+  }
+  matchedIds.add(config.id)
+  if (!config.enabled) {
+    log.info(`  -> skipping ${deviceLabel(config, intercom)}: enabled=false`)
+    continue
+  }
+  intercom._schedule = config.schedule
+  intercom._timing = config.timing
+  intercom._configName = config.name
+  intercoms.push(intercom)
+}
+for (const config of deviceConfigs.values()) {
+  if (!matchedIds.has(config.id)) {
+    log.warn(
+      `devices.json lists ${deviceLabel(config)}, but no matching intercom was found on this account`,
+    )
+  }
+}
+if (intercoms.length === 0) {
+  log.error(
+    'No enabled devices from devices.json matched an intercom on this account. Check ids and enabled flags.',
+  )
+  process.exit(1)
+}
+
+for (const intercom of intercoms) {
+  const schedule = intercom._schedule
+  const timing = intercom._timing
+  const label = intercom._configName
+    ? `"${intercom._configName}" / Ring "${intercom.name}" (id ${intercom.id})`
+    : `"${intercom.name}" (id ${intercom.id})`
+  log.info(
+    `Enrolling ${label}: days [${schedule.days.join(',')}], ` +
+      `hours ${formatHours(schedule.hours)} (${schedule.timezone}), ` +
+      `delay ${timing.minDelay}-${timing.maxDelay}s, cooldown ${timing.cooldown}s — ` +
+      `now ${localTime(schedule.timezone)}, window ${isWithinSchedule(schedule) ? 'ACTIVE' : 'NOT active'}`,
   )
 
   // track device state changes (battery, connectivity)
@@ -174,9 +328,9 @@ for (const intercom of intercoms) {
   let busyUntil = 0
 
   intercom.onDing.subscribe(() => {
-    log.info(`DING received from "${intercom.name}" (at ${localTime()})`)
+    log.info(`DING received from "${intercom.name}" (at ${localTime(schedule.timezone)})`)
 
-    if (!isWithinSchedule()) {
+    if (!isWithinSchedule(schedule)) {
       log.info('  -> ignored: outside the auto-unlock time window')
       return
     }
@@ -187,15 +341,16 @@ for (const intercom of intercoms) {
       return
     }
 
-    const delaySeconds = MIN_DELAY + Math.random() * (MAX_DELAY - MIN_DELAY)
-    busyUntil = now + (delaySeconds + COOLDOWN) * 1000
+    const delaySeconds =
+      timing.minDelay + Math.random() * (timing.maxDelay - timing.minDelay)
+    busyUntil = now + (delaySeconds + timing.cooldown) * 1000
     const openAt = new Date(now + delaySeconds * 1000)
     log.info(
-      `  -> unlock scheduled in ${delaySeconds.toFixed(1)}s (at ${localTime(openAt)})`,
+      `  -> unlock scheduled in ${delaySeconds.toFixed(1)}s (at ${localTime(schedule.timezone, openAt)})`,
     )
 
     setTimeout(async () => {
-      if (!isWithinSchedule()) {
+      if (!isWithinSchedule(schedule)) {
         busyUntil = 0
         log.warn(`Unlock cancelled ("${intercom.name}"): closing time reached`)
         return
@@ -205,7 +360,7 @@ for (const intercom of intercoms) {
       try {
         await intercom.unlock()
         log.info(`GATE OPENED ("${intercom.name}", command succeeded in ${Date.now() - started}ms)`)
-        log.debug(`  cooldown active for another ${COOLDOWN}s`)
+        log.debug(`  cooldown active for another ${timing.cooldown}s`)
       } catch (e) {
         busyUntil = 0
         log.error(`Failed to unlock ("${intercom.name}"):`, e.message)
@@ -226,12 +381,15 @@ for (const intercom of intercoms) {
 if (HEARTBEAT_MINUTES > 0) {
   setInterval(() => {
     const status = intercoms
-      .map(
-        (i) =>
-          `"${i.name}": ${i.isOffline ? 'OFFLINE' : 'online'}, battery ${i.batteryLevel}%`,
-      )
+      .map((i) => {
+        const schedule = i._schedule
+        return (
+          `"${i.name}": ${i.isOffline ? 'OFFLINE' : 'online'}, battery ${i.batteryLevel}%, ` +
+          `window ${isWithinSchedule(schedule) ? 'ACTIVE' : 'not active'}`
+        )
+      })
       .join('; ')
-    log.info(`Heartbeat — service alive, window ${isWithinSchedule() ? 'ACTIVE' : 'not active'} (${status})`)
+    log.info(`Heartbeat — service alive (${status})`)
   }, HEARTBEAT_MINUTES * 60 * 1000)
 }
 

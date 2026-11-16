@@ -9,3 +9,7 @@ services:
       # il .env deve restare scrivibile: Ring ruota il refresh token
       # e il servizio lo riscrive qui dentro
       - ./.env:/app/.env
+      # required: per-intercom schedule + timing (file must exist before compose up)
+      - ./devices.json:/app/devices.json:ro
+
+

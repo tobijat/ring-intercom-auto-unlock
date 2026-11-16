@@ -1,0 +1,24 @@
+[
+  {
+    "name": "Apartment A",
+    "id": 111111111,
+    "enabled": true,
+    "activeDays": "1,2,3,4,5",
+    "activeHours": "8-20",
+    "timezone": "Europe/Berlin",
+    "minDelaySeconds": 5,
+    "maxDelaySeconds": 20,
+    "cooldownSeconds": 60
+  },
+  {
+    "name": "Apartment B",
+    "id": 222222222,
+    "enabled": false,
+    "activeDays": "1,2,3,4,5",
+    "activeHours": "9-18",
+    "timezone": "Europe/Berlin",
+    "minDelaySeconds": 3,
+    "maxDelaySeconds": 8,
+    "cooldownSeconds": 60
+  }
+]
