@@ -15,7 +15,7 @@ Perfect for shops, offices, B&Bs and anyone who wants the front door or gate to 
 - 🔔 **Listens for ding events** in real time via Ring push notifications
 - 🏠 **Multiple intercoms** — configure each device separately in `devices.json`
 - ⏱️ **Per-device random delay** before unlocking so it feels like a human buzzed you in
-- 📅 **Per-device schedule** — days, hours, and timezone (multiple hour windows per day, e.g. `8-12,13-20`)
+- 📅 **Per-device schedule** — weekly days/hours plus optional one-off `activeWindows` that force unlock on even outside the weekly rules
 - 🔁 **Per-device cooldown** so a double ring doesn't open the door twice
 - ✅ **Enable/disable** individual devices without removing them from the config
 - 🔑 **Automatic refresh-token rotation** — authenticate once, runs forever
@@ -112,12 +112,19 @@ Copy from [`devices.json.example`](devices.json.example). Only **enabled** devic
 | `name`             | no       | Label for logs (does not have to match the Ring app name) |
 | `id`               | yes      | Numeric Ring intercom id from the startup log |
 | `enabled`          | no       | `true` (default) or `false` to skip without deleting the entry |
-| `activeDays`       | yes      | Days `1`–`7` (1 = Monday … 7 = Sunday), comma-separated |
-| `activeHours`      | yes      | Hour ranges, start inclusive / end exclusive — e.g. `8-20` or `8-12,13-20` |
-| `timezone`         | yes      | IANA timezone used for that device's schedule (e.g. `Europe/Berlin`) |
+| `activeDays`       | yes      | Days `1`–`7` (1 = Monday … 7 = Sunday), comma-separated. Use `""` for no weekly days |
+| `activeHours`      | yes      | Hour ranges, start inclusive / end exclusive — e.g. `8-20` or `8-12,13-20`. Use `""` for no weekly hours |
+| `timezone`         | yes      | IANA timezone for weekly schedule **and** `activeWindows` (e.g. `Europe/Berlin`) |
 | `minDelaySeconds`  | yes      | Minimum delay before unlock |
 | `maxDelaySeconds`  | yes      | Maximum delay before unlock |
 | `cooldownSeconds`  | yes      | Ignore further dings for N seconds after an unlock attempt |
+| `activeWindows`    | no       | Extra one-off active periods (see below). Omit or `[]` if unused |
+
+**When is auto-unlock active?** If the weekly schedule matches **or** the current time falls inside any `activeWindows` entry. Those windows force the device **on** even outside `activeDays` / `activeHours`. The weekly schedule still applies when you are not inside a window.
+
+Empty `"activeDays": ""` or `"activeHours": ""` disables that part of the weekly schedule (so the weekly rule never matches). If both the weekly schedule is disabled and `activeWindows` is empty/missing, the service starts anyway but logs a **warning** — dings will be ignored until you add a schedule or window.
+
+**`activeWindows`:** each entry is `{ "start": "YYYY-MM-DD HH:mm", "end": "YYYY-MM-DD HH:mm" }` in that device's `timezone`. Start is inclusive, end is exclusive (same idea as `activeHours`). Example: `"end": "2026-11-17 10:05"` means active until 10:05:00, not including that instant.
 
 Example:
 
@@ -132,7 +139,11 @@ Example:
     "timezone": "Europe/Berlin",
     "minDelaySeconds": 5,
     "maxDelaySeconds": 20,
-    "cooldownSeconds": 60
+    "cooldownSeconds": 60,
+    "activeWindows": [
+      { "start": "2026-11-16 18:52", "end": "2026-11-17 10:05" },
+      { "start": "2026-12-10 16:30", "end": "2026-12-18 05:45" }
+    ]
   }
 ]
 ```

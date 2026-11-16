@@ -83,18 +83,18 @@ function writeLogFile(line) {
 const WEEKDAYS = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }
 
 function parseDays(value) {
-  return String(value)
-    .split(',')
-    .map((part) => Number(part.trim()))
+  const trimmed = String(value ?? '').trim()
+  if (!trimmed) return []
+  return trimmed.split(',').map((part) => Number(part.trim()))
 }
 
 function parseHours(value) {
-  return String(value)
-    .split(',')
-    .map((range) => {
-      const [start, end] = range.trim().split('-').map(Number)
-      return { start, end }
-    })
+  const trimmed = String(value ?? '').trim()
+  if (!trimmed) return []
+  return trimmed.split(',').map((range) => {
+    const [start, end] = range.trim().split('-').map(Number)
+    return { start, end }
+  })
 }
 
 function validateHours(hours, label) {
@@ -112,7 +112,81 @@ function localTime(timezone, date = new Date()) {
   return date.toLocaleString('en-GB', { timeZone: timezone })
 }
 
-function isWithinSchedule(schedule, date = new Date()) {
+// Convert a wall-clock time in `timezone` to a UTC epoch ms (handles DST).
+function zonedLocalToUtcMs(timezone, year, month, day, hour, minute) {
+  const utcGuess = Date.UTC(year, month - 1, day, hour, minute, 0)
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  })
+  const offsetFor = (date) => {
+    const parts = Object.fromEntries(
+      dtf
+        .formatToParts(date)
+        .filter((part) => part.type !== 'literal')
+        .map((part) => [part.type, part.value]),
+    )
+    const asUtc = Date.UTC(
+      Number(parts.year),
+      Number(parts.month) - 1,
+      Number(parts.day),
+      Number(parts.hour),
+      Number(parts.minute),
+      Number(parts.second),
+    )
+    return asUtc - date.getTime()
+  }
+  const once = new Date(utcGuess - offsetFor(new Date(utcGuess)))
+  return utcGuess - offsetFor(once)
+}
+
+const WINDOW_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/
+
+function parseWindowInstant(value, timezone, label, field) {
+  const match = String(value).trim().match(WINDOW_TIME_RE)
+  if (!match) {
+    console.error(
+      `${label}: window "${field}" must look like "2026-11-16 18:52" (got ${JSON.stringify(value)})`,
+    )
+    process.exit(1)
+  }
+  const [, y, mo, d, h, mi] = match.map(Number)
+  return zonedLocalToUtcMs(timezone, y, mo, d, h, mi)
+}
+
+function parseActiveWindows(activeWindows, timezone, label) {
+  if (activeWindows == null) return []
+  if (!Array.isArray(activeWindows)) {
+    console.error(`${label}: "activeWindows" must be an array`)
+    process.exit(1)
+  }
+  return activeWindows.map((window, index) => {
+    if (!window || typeof window !== 'object') {
+      console.error(`${label}: activeWindows[${index}] must be an object with start/end`)
+      process.exit(1)
+    }
+    const startMs = parseWindowInstant(window.start, timezone, label, 'start')
+    const endMs = parseWindowInstant(window.end, timezone, label, 'end')
+    if (!(startMs < endMs)) {
+      console.error(`${label}: activeWindows[${index}] start must be before end`)
+      process.exit(1)
+    }
+    return {
+      startMs,
+      endMs,
+      start: String(window.start).trim(),
+      end: String(window.end).trim(),
+    }
+  })
+}
+
+function isWithinWeeklySchedule(schedule, date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: schedule.timezone,
     weekday: 'short',
@@ -125,6 +199,17 @@ function isWithinSchedule(schedule, date = new Date()) {
     schedule.days.includes(weekday) &&
     schedule.hours.some(({ start, end }) => hour >= start && hour < end)
   )
+}
+
+function isWithinCustomWindow(schedule, date = new Date()) {
+  const now = date.getTime()
+  // start inclusive, end exclusive — same convention as activeHours
+  return schedule.activeWindows.some(({ startMs, endMs }) => now >= startMs && now < endMs)
+}
+
+// Weekly schedule OR any custom window (activeWindows force ON even outside activeDays/hours)
+function isWithinSchedule(schedule, date = new Date()) {
+  return isWithinWeeklySchedule(schedule, date) || isWithinCustomWindow(schedule, date)
 }
 
 function requireNumber(entry, key, label) {
@@ -146,21 +231,30 @@ function timingFromValues(minDelay, maxDelay, cooldown, label) {
 
 function scheduleFromDevice(entry) {
   const label = entry.name ? `"${entry.name}" (id ${entry.id})` : `id ${entry.id}`
-  for (const key of ['activeDays', 'activeHours', 'timezone']) {
-    if (entry[key] == null || entry[key] === '') {
-      console.error(`devices.json entry ${label} is missing required "${key}"`)
-      process.exit(1)
-    }
+  if (entry.timezone == null || entry.timezone === '') {
+    console.error(`devices.json entry ${label} is missing required "timezone"`)
+    process.exit(1)
+  }
+  if (entry.activeDays == null) {
+    console.error(`devices.json entry ${label} is missing "activeDays" (use "" to disable the weekly day filter)`)
+    process.exit(1)
+  }
+  if (entry.activeHours == null) {
+    console.error(`devices.json entry ${label} is missing "activeHours" (use "" to disable the weekly hour filter)`)
+    process.exit(1)
   }
   const days = parseDays(entry.activeDays)
   const hours = parseHours(entry.activeHours)
   const timezone = String(entry.timezone)
-  validateHours(hours, `activeHours for ${label}`)
+  if (hours.length > 0) {
+    validateHours(hours, `activeHours for ${label}`)
+  }
   if (days.some((day) => !Number.isInteger(day) || day < 1 || day > 7)) {
     console.error(`Invalid activeDays for ${label}: "${entry.activeDays}"`)
     process.exit(1)
   }
-  return { days, hours, timezone }
+  const activeWindows = parseActiveWindows(entry.activeWindows, timezone, label)
+  return { days, hours, timezone, activeWindows }
 }
 
 function timingFromDevice(entry) {
@@ -358,11 +452,22 @@ for (const intercom of intercoms) {
   const label = intercom._configName
     ? `"${intercom._configName}" / Ring "${intercom.name}" (id ${intercom.id})`
     : `"${intercom.name}" (id ${intercom.id})`
+  const viaWeekly = isWithinWeeklySchedule(schedule)
+  const viaCustom = isWithinCustomWindow(schedule)
+  const activeReason = viaCustom ? 'activeWindows' : viaWeekly ? 'weekly schedule' : 'none'
+  const hasWeekly = schedule.days.length > 0 && schedule.hours.length > 0
+  if (!hasWeekly && schedule.activeWindows.length === 0) {
+    log.warn(
+      `${label}: no active schedule (empty activeDays/activeHours and no activeWindows) — dings will be ignored until you add one`,
+    )
+  }
   log.info(
-    `Enrolling ${label}: days [${schedule.days.join(',')}], ` +
-      `hours ${formatHours(schedule.hours)} (${schedule.timezone}), ` +
+    `Enrolling ${label}: days [${schedule.days.length ? schedule.days.join(',') : 'none'}], ` +
+      `hours ${schedule.hours.length ? formatHours(schedule.hours) : 'none'} (${schedule.timezone}), ` +
+      `activeWindows ${schedule.activeWindows.length}, ` +
       `delay ${timing.minDelay}-${timing.maxDelay}s, cooldown ${timing.cooldown}s — ` +
-      `now ${localTime(schedule.timezone)}, window ${isWithinSchedule(schedule) ? 'ACTIVE' : 'NOT active'}`,
+      `now ${localTime(schedule.timezone)}, ` +
+      `${isWithinSchedule(schedule) ? 'ACTIVE' : 'NOT active'} (${activeReason})`,
   )
 
   // track device state changes (battery, connectivity)
