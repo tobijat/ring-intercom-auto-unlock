@@ -20,11 +20,65 @@ import { RingApi } from 'ring-client-api'
 const APP_DIR = dirname(fileURLToPath(import.meta.url))
 const ENV_PATH = join(APP_DIR, '.env')
 const DEVICES_PATH = join(APP_DIR, 'devices.json')
+const LOG_FILE_PATH = join(APP_DIR, 'auto-unlock.log')
 
 // info (default) | debug — debug also enables ring-client-api internal logs
 const LOG_LEVEL = process.env.LOG_LEVEL ?? 'info'
 // how often (minutes) to log that the service is alive (0 = disabled)
 const HEARTBEAT_MINUTES = Number(process.env.HEARTBEAT_MINUTES ?? 60)
+// keep file logs for N days (0 = file logging off). Newest lines at the top of auto-unlock.log
+const LOG_FILE_DAYS = Number(process.env.LOG_FILE ?? 0)
+if (!Number.isInteger(LOG_FILE_DAYS) || LOG_FILE_DAYS < 0) {
+  console.error(`Invalid LOG_FILE: "${process.env.LOG_FILE}". Expected 0 (off) or a positive number of days.`)
+  process.exit(1)
+}
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000
+let logFileQueue = Promise.resolve()
+
+function formatLogArgs(args) {
+  return args
+    .map((arg) => {
+      if (typeof arg === 'string') return arg
+      if (arg instanceof Error) return arg.stack || arg.message
+      try {
+        return JSON.stringify(arg)
+      } catch {
+        return String(arg)
+      }
+    })
+    .join(' ')
+}
+
+function lineTimestampMs(line) {
+  const match = line.match(/^(\d{4}-\d{2}-\d{2}T[\d:.]+Z)/)
+  return match ? Date.parse(match[1]) : NaN
+}
+
+function writeLogFile(line) {
+  if (LOG_FILE_DAYS === 0) return
+  logFileQueue = logFileQueue
+    .then(async () => {
+      const cutoff = Date.now() - LOG_FILE_DAYS * MS_PER_DAY
+      let existing = ''
+      try {
+        existing = await readFile(LOG_FILE_PATH, 'utf8')
+      } catch (e) {
+        if (e.code !== 'ENOENT') throw e
+      }
+      const kept = existing
+        .split(/\r?\n/)
+        .filter((entry) => entry.length > 0)
+        .filter((entry) => {
+          const ts = lineTimestampMs(entry)
+          return Number.isNaN(ts) || ts >= cutoff
+        })
+      await writeFile(LOG_FILE_PATH, [line, ...kept].join('\n') + '\n')
+    })
+    .catch((e) => {
+      console.error(new Date().toISOString(), '[error]', 'Failed to write auto-unlock.log:', e.message)
+    })
+}
 
 const WEEKDAYS = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }
 
@@ -186,7 +240,9 @@ function deviceLabel(config, intercom) {
 
 const log = {
   write(level, args) {
-    console.log(new Date().toISOString(), `[${level}]`, ...args)
+    const iso = new Date().toISOString()
+    console.log(iso, `[${level}]`, ...args)
+    writeLogFile(`${iso} [${level}] ${formatLogArgs(args)}`)
   },
   debug(...args) {
     if (LOG_LEVEL === 'debug') this.write('debug', args)
@@ -214,6 +270,11 @@ const deviceConfigs = await loadDeviceConfigs()
 
 log.info('Starting auto-unlock service')
 log.info(`  node ${process.version}, log level: ${LOG_LEVEL}`)
+if (LOG_FILE_DAYS > 0) {
+  log.info(`  file logging: auto-unlock.log, keep ${LOG_FILE_DAYS} day(s), newest first`)
+} else {
+  log.info('  file logging: off (LOG_FILE=0)')
+}
 const enabledCount = [...deviceConfigs.values()].filter((d) => d.enabled).length
 log.info(
   `  devices.json loaded (${deviceConfigs.size} listed, ${enabledCount} enabled)`,

@@ -101,6 +101,7 @@ Works on Synology (Container Manager), QNAP (Container Station), any VPS, or a f
 | `RING_REFRESH_TOKEN` | —       | Ring auth token (get it with `npx ring-auth-cli`)      |
 | `LOG_LEVEL`          | `info`  | `info` or `debug` (adds ring-client-api internal logs) |
 | `HEARTBEAT_MINUTES`  | `60`    | Log an "I'm alive" line every N minutes (`0` = never)  |
+| `LOG_FILE`           | `0`     | Keep `auto-unlock.log` for N days (`0` = file logging off). Newest entries at the top; older than N days are dropped |
 
 ### `devices.json` (per intercom configuration)
 

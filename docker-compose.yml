@@ -11,5 +11,7 @@ services:
       - ./.env:/app/.env
       # required: per-intercom schedule + timing (file must exist before compose up)
       - ./devices.json:/app/devices.json:ro
+      # optional file log when LOG_FILE > 0 (create first: touch auto-unlock.log)
+      # - ./auto-unlock.log:/app/auto-unlock.log
 
 
