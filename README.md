@@ -17,6 +17,7 @@ Perfect for shops, offices, B&Bs and anyone who wants the front door or gate to 
 - ⏱️ **Per-device random delay** before unlocking so it feels like a human buzzed you in
 - 📅 **Per-device schedule** — weekly days/hours plus optional one-off `activeWindows` that force unlock on even outside the weekly rules
 - 🔁 **Per-device cooldown** so a double ring doesn't open the door twice
+- 🔢 **Optional press pattern** — exact N rings within T seconds (`pressWindowPresses` / `pressWindowSeconds`; omit or `0` to disable)
 - ✅ **Enable/disable** individual devices without removing them from the config
 - 🔑 **Automatic refresh-token rotation** — authenticate once, runs forever
 - 📝 **Detailed logging** with `info`/`debug` levels, heartbeat, offline and low-battery warnings
@@ -119,12 +120,16 @@ Copy from [`devices.json.example`](devices.json.example). Only **enabled** devic
 | `maxDelaySeconds`  | yes      | Maximum delay before unlock |
 | `cooldownSeconds`  | yes      | Ignore further dings for N seconds after an unlock attempt |
 | `activeWindows`    | no       | Extra one-off active periods (see below). Omit or `[]` if unused |
+| `pressWindowPresses` | no     | Exact ding count required (`0` or omit = pattern off) |
+| `pressWindowSeconds` | no     | Seconds after the first ding to evaluate the count (`0` or omit = pattern off) |
 
 **When is auto-unlock active?** If the weekly schedule matches **or** the current time falls inside any `activeWindows` entry. Those windows force the device **on** even outside `activeDays` / `activeHours`. The weekly schedule still applies when you are not inside a window.
 
 Empty `"activeDays": ""` or `"activeHours": ""` disables that part of the weekly schedule (so the weekly rule never matches). If both the weekly schedule is disabled and `activeWindows` is empty/missing, the service starts anyway but logs a **warning** — dings will be ignored until you add a schedule or window.
 
 **`activeWindows`:** each entry is `{ "start": "YYYY-MM-DD HH:mm", "end": "YYYY-MM-DD HH:mm" }` in that device's `timezone`. Start is inclusive, end is exclusive (same idea as `activeHours`). Example: `"end": "2026-11-17 10:05"` means active until 10:05:00, not including that instant.
+
+**Press pattern (optional):** with `"pressWindowPresses": 3` and `"pressWindowSeconds": 10`, the first ding starts a 10s window. When that window ends, unlock runs only if the count is **exactly** 3 — not 1, 2, 4, …. Omit both keys, or set either to `0`, to disable the pattern (every ding unlocks, after delay/cooldown). Both must be `> 0` to enable. The weekly schedule / `activeWindows` still apply: presses outside an active time are ignored, and a matched pattern will not unlock if the active period has already ended.
 
 Example:
 
@@ -140,6 +145,8 @@ Example:
     "minDelaySeconds": 5,
     "maxDelaySeconds": 20,
     "cooldownSeconds": 60,
+    "pressWindowPresses": 3,
+    "pressWindowSeconds": 10,
     "activeWindows": [
       { "start": "2026-11-16 18:52", "end": "2026-11-17 10:05" },
       { "start": "2026-12-10 16:30", "end": "2026-12-18 05:45" }

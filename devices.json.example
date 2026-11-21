@@ -12,7 +12,9 @@
     "timezone": "Europe/Berlin",
     "minDelaySeconds": 5,
     "maxDelaySeconds": 20,
-    "cooldownSeconds": 60
+    "cooldownSeconds": 60,
+    "pressWindowPresses": 3,
+    "pressWindowSeconds": 10
   },
   {
     "name": "Apartment B",

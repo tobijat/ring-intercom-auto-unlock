@@ -273,6 +273,40 @@ function timingFromDevice(entry) {
   )
 }
 
+function patternFromDevice(entry) {
+  const label = entry.name ? `"${entry.name}" (id ${entry.id})` : `id ${entry.id}`
+  const rawPresses =
+    entry.pressWindowPresses == null || entry.pressWindowPresses === ''
+      ? 0
+      : requireNumber(entry, 'pressWindowPresses', label)
+  const rawSeconds =
+    entry.pressWindowSeconds == null || entry.pressWindowSeconds === ''
+      ? 0
+      : requireNumber(entry, 'pressWindowSeconds', label)
+
+  if (!Number.isInteger(rawPresses) || rawPresses < 0) {
+    console.error(`${label}: "pressWindowPresses" must be an integer >= 0 (0 = disabled)`)
+    process.exit(1)
+  }
+  if (!Number.isInteger(rawSeconds) || rawSeconds < 0) {
+    console.error(`${label}: "pressWindowSeconds" must be an integer >= 0 (0 = disabled)`)
+    process.exit(1)
+  }
+
+  // Missing or 0 on either setting disables the pattern (unlock on every ding)
+  const enabled = rawPresses > 0 && rawSeconds > 0
+  if ((rawPresses > 0) !== (rawSeconds > 0)) {
+    console.warn(
+      `${label}: pressWindowPresses and pressWindowSeconds must both be > 0 to enable the pattern; treating as disabled`,
+    )
+  }
+  return {
+    enabled,
+    pressWindowPresses: enabled ? rawPresses : 0,
+    pressWindowSeconds: enabled ? rawSeconds : 0,
+  }
+}
+
 async function loadDeviceConfigs() {
   let raw
   try {
@@ -321,6 +355,7 @@ async function loadDeviceConfigs() {
       enabled: entry.enabled !== false,
       schedule: scheduleFromDevice(entry),
       timing: timingFromDevice(entry),
+      pattern: patternFromDevice(entry),
     })
   }
   return byId
@@ -429,6 +464,7 @@ for (const intercom of allIntercoms) {
   }
   intercom._schedule = config.schedule
   intercom._timing = config.timing
+  intercom._pattern = config.pattern
   intercom._configName = config.name
   intercoms.push(intercom)
 }
@@ -449,6 +485,7 @@ if (intercoms.length === 0) {
 for (const intercom of intercoms) {
   const schedule = intercom._schedule
   const timing = intercom._timing
+  const pattern = intercom._pattern
   const label = intercom._configName
     ? `"${intercom._configName}" / Ring "${intercom.name}" (id ${intercom.id})`
     : `"${intercom.name}" (id ${intercom.id})`
@@ -461,10 +498,13 @@ for (const intercom of intercoms) {
       `${label}: no active schedule (empty activeDays/activeHours and no activeWindows) — dings will be ignored until you add one`,
     )
   }
+  const patternDesc = pattern.enabled
+    ? `exactly ${pattern.pressWindowPresses} presses in ${pattern.pressWindowSeconds}s`
+    : 'off (every ding)'
   log.info(
     `Enrolling ${label}: days [${schedule.days.length ? schedule.days.join(',') : 'none'}], ` +
       `hours ${schedule.hours.length ? formatHours(schedule.hours) : 'none'} (${schedule.timezone}), ` +
-      `activeWindows ${schedule.activeWindows.length}, ` +
+      `activeWindows ${schedule.activeWindows.length}, press pattern ${patternDesc}, ` +
       `delay ${timing.minDelay}-${timing.maxDelay}s, cooldown ${timing.cooldown}s — ` +
       `now ${localTime(schedule.timezone)}, ` +
       `${isWithinSchedule(schedule) ? 'ACTIVE' : 'NOT active'} (${activeReason})`,
@@ -492,21 +532,24 @@ for (const intercom of intercoms) {
   })
 
   let busyUntil = 0
+  let pressCount = 0
+  let pressWindowTimer = null
 
-  intercom.onDing.subscribe(() => {
-    log.info(`DING received from "${intercom.name}" (at ${localTime(schedule.timezone)})`)
+  function clearPressWindow() {
+    if (pressWindowTimer) {
+      clearTimeout(pressWindowTimer)
+      pressWindowTimer = null
+    }
+    pressCount = 0
+  }
 
+  function scheduleUnlock() {
+    // Active schedule (weekly and/or activeWindows) is always required
     if (!isWithinSchedule(schedule)) {
       log.info('  -> ignored: outside the auto-unlock time window')
       return
     }
     const now = Date.now()
-    if (now < busyUntil) {
-      const secondsLeft = Math.ceil((busyUntil - now) / 1000)
-      log.info(`  -> ignored: unlock already in progress or cooling down (${secondsLeft}s left)`)
-      return
-    }
-
     const delaySeconds =
       timing.minDelay + Math.random() * (timing.maxDelay - timing.minDelay)
     busyUntil = now + (delaySeconds + timing.cooldown) * 1000
@@ -533,6 +576,62 @@ for (const intercom of intercoms) {
         log.debug(e.stack)
       }
     }, delaySeconds * 1000)
+  }
+
+  function evaluatePressPattern() {
+    pressWindowTimer = null
+    const count = pressCount
+    pressCount = 0
+    if (!isWithinSchedule(schedule)) {
+      log.info(
+        `  -> ignored: press pattern ended outside the auto-unlock time window ` +
+          `(was ${count}/${pattern.pressWindowPresses})`,
+      )
+      return
+    }
+    if (count === pattern.pressWindowPresses) {
+      log.info(
+        `  -> press pattern matched: ${count}/${pattern.pressWindowPresses} in ${pattern.pressWindowSeconds}s`,
+      )
+      scheduleUnlock()
+      return
+    }
+    log.info(
+      `  -> ignored: press pattern was ${count}/${pattern.pressWindowPresses} ` +
+        `(need exactly ${pattern.pressWindowPresses} in ${pattern.pressWindowSeconds}s)`,
+    )
+  }
+
+  intercom.onDing.subscribe(() => {
+    log.info(`DING received from "${intercom.name}" (at ${localTime(schedule.timezone)})`)
+
+    if (!isWithinSchedule(schedule)) {
+      clearPressWindow()
+      log.info('  -> ignored: outside the auto-unlock time window')
+      return
+    }
+    const now = Date.now()
+    if (now < busyUntil) {
+      const secondsLeft = Math.ceil((busyUntil - now) / 1000)
+      log.info(`  -> ignored: unlock already in progress or cooling down (${secondsLeft}s left)`)
+      return
+    }
+
+    if (!pattern.enabled) {
+      scheduleUnlock()
+      return
+    }
+
+    pressCount += 1
+    if (!pressWindowTimer) {
+      pressWindowTimer = setTimeout(evaluatePressPattern, pattern.pressWindowSeconds * 1000)
+      log.info(
+        `  -> press ${pressCount}/${pattern.pressWindowPresses}, ` +
+          `window ${pattern.pressWindowSeconds}s started`,
+      )
+    } else {
+      log.info(`  -> press ${pressCount}/${pattern.pressWindowPresses} in open window`)
+    }
   })
 
   intercom.onUnlocked.subscribe(() => {
